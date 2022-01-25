@@ -1,0 +1,24 @@
+- subsets: [['core', 0]]
+  epoch: 1
+  shuffle: False
+- subsets: [['core', 1]]
+  epoch: 1
+  shuffle: False
+- subsets: [['core', 2]]
+  epoch: 1
+  shuffle: False
+- subsets: [['core', 3]]
+  epoch: 1
+  shuffle: False
+- subsets: [['core', 4]]
+  epoch: 1
+  shuffle: False
+- subsets: [['core', 5]]
+  epoch: 1
+  shuffle: False
+- subsets: [['core', 6]]
+  epoch: 1
+  shuffle: False
+- subsets: [['core', 7]]
+  epoch: 1
+  shuffle: False

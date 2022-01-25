@@ -309,7 +309,7 @@ class MultiLabelDataset(Dataset, ABC):
 # =================
 # Concrete Datasets
 # =================
-class MNIST(torchvision.datasets.MNIST, ClassificationDataset):
+class MNIST(torchvision.datasets.MNIST, ):
     name = 'mnist'
     # num_classes = 3
     num_classes = 10
@@ -989,9 +989,555 @@ class MSCOCO(BaseDataset):
         return results_dict
 
 
+class CORe50UB(BaseDataset):
+    name = 'core'
+
+    def __init__(self, config, train=True):
+        """
+        :param data_name: base name of processed datasets
+        :param transform: image transform pipeline
+        """
+        super().__init__(config, train)
+        print("CORE DATASET")
+        # load major, moderate, minor cats lst
+        with open('./resources/major_cats_core.json', 'r') as f:
+            major_cats = json.load(f)
+        with open('./resources/moderate_cats_core.json', 'r') as f:
+            moderate_cats = json.load(f)
+        with open('./resources/minor_cats_core.json', 'r') as f:
+            minor_cats = json.load(f)
+        # for reporting detailed performance of alg at long-tail distribution
+        self.split_cats_dict = {'major': major_cats, 'moderate': moderate_cats, 'minor': minor_cats}
+
+
+        self.num_tasks = int(config['num_tasks'])
+
+        if train:
+            if config['e'] in ['vac_encoder', 'exstream_encoder_vac']:
+                transform = transforms.Compose([
+                    transforms.Resize((288, 288)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+            elif config['e'] == 'rma_encoder':
+                transform = transforms.Compose([
+                    transforms.Resize((512, 512)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+            else:
+                transform = transforms.Compose([
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+
+        else:
+            if config['e'] in ['vac_encoder', 'exstream_encoder_vac']:
+                transform = transforms.Compose([
+                    transforms.Resize((288, 288)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+            elif config['e'] == 'rma_encoder':
+                transform = transforms.Compose([
+                    transforms.Resize((512, 512)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+            else:
+                transform = transforms.Compose([
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+
+        if config['e'] == 'none':
+            transform = None
+
+        # multi_hot dict
+        with open(os.path.join(str(config['data_root']),'multi_hot_dict_{name}.json'.format(name=self.name)), 'r') as j:
+            self.category_map = np.asarray(json.load(j))
+
+        # Create subset for each task
+        for y in range(self.num_tasks):
+            self.subsets[y] = MultiLabelDataset(config, self.name, task_idx=y, transform=transform, train=train)
+
+    def collate_fn(self, batch):
+        nitems = len(batch[0])
+
+        results = []   # stack img, categories
+        for i in range(0, nitems):
+            results.append(torch.stack([item[i] for item in batch]))
+
+        return tuple(results)
+
+    def __len__(self):
+        total_len = 0
+        for y in range(self.num_tasks):
+            total_len += len(self.subsets[y])
+        return total_len
+
+    def _eval_model(
+            self,
+            model: Model,
+            writer: SummaryWriter,
+            step, t, eval_title, results_dict):
+
+        training = model.training
+        model.eval()
+
+        if t in self.config['schedule_simple']:
+            t_idx = self.config['schedule_simple'].index(t)
+        else:
+            t_idx = len(self.config['schedule_simple']) - 1
+
+        # for calculating total performance
+        targets_total = []
+        probs_total = []
+
+        # Accuracy of each subset
+        # for order_i , t_i in enumerate(self.config['schedule_simple'][:t_idx+1]):
+        for order_i , t_i in enumerate(self.config['schedule_simple'][:1]):
+            subset_name = t_i
+            last_id = self.config['schedule_simple'][-1] # XXX should be -1. -2 for debugging.
+            subset = self.subsets[t_i]
+            data = DataLoader(
+                subset,
+                batch_size=self.config['eval_batch_size'],
+                num_workers=self.config['eval_num_workers'],
+                collate_fn=self.collate_fn,
+            )
+
+            # results is dict. {method: group_averagemeter_object}
+            # CORE
+            results, targets, probs = validate(subset_name, model, data, self.category_map,
+                                                  results_dict, last_id, self.split_cats_dict, 10)
+
+            targets_total.append(targets)
+            probs_total.append(probs)
+
+            if subset_name in results_dict:
+                results_dict[subset_name].append(results)
+            else:
+                results_dict[subset_name] = [results]
+
+
+
+            for metric in results.keys():
+                results[metric].write_to_excel(os.path.join(writer.logdir, 'results_{}.xlsx'.format(metric)),
+                                                sheet_name='task {}'.format(subset_name),
+                                                column_name='task {}'.format(self.config['schedule_simple'][t_idx]),
+                                                info='avg')
+
+        # =================================================================================================================
+        # calculate scores for trained tasks.
+        prefix = 'tally_'   # prefix for tensorboard plotting and csv filename
+
+        targets_total = torch.cat(targets_total, axis=0)
+        probs_total = torch.cat(probs_total, axis=0)
+        predicts_total = probs_total > 0.5   # BCE style predicts
+        total_metric = ['CP', 'CR', 'CF1', 'OP', 'OR', 'OF1', 'mAP']
+        results = dict()   # reset results
+
+        CP, CR, CF1, OP, OR, OF1, mAP = (AverageMeter() for _ in range(len(total_metric)))
+
+        ncats = targets_total.sum(axis=0)
+        # ignore classes in future tasks
+        cats_in_task_idx = ncats > 0
+        cats_in_task_name = self.category_map[cats_in_task_idx].tolist()
+        targets_total = targets_total
+        probs_total = probs_total
+        predicts_total = predicts_total
+
+        # calculate score
+        precision_pc = torch.mean(precision_score_per_class(targets_total[:, cats_in_task_idx], predicts_total[:, cats_in_task_idx], zero_division=0))
+        recall_pc = torch.mean(recall_score_per_class(targets_total[:, cats_in_task_idx], predicts_total[:, cats_in_task_idx], zero_division=0))
+        # CF1. note that CF1 is not a mean value of categories' f1_score
+        f1_pc = ((2*precision_pc*recall_pc)/(precision_pc+recall_pc)) if (precision_pc+recall_pc)>0 else torch.tensor([0.])
+        precision_oa = precision_score_overall(targets_total[:, cats_in_task_idx], predicts_total[:, cats_in_task_idx], zero_division=0)
+        recall_oa = recall_score_overall(targets_total[:, cats_in_task_idx], predicts_total[:, cats_in_task_idx], zero_division=0)
+        f1_oa = f1_score_overall(targets_total[:, cats_in_task_idx], predicts_total[:, cats_in_task_idx], zero_division=0)
+        map_ = mean_average_precision(targets_total[:, cats_in_task_idx], probs_total[:, cats_in_task_idx])
+        # save to AverageMeter
+        CP.update(precision_pc.item())
+        CR.update(recall_pc.item())
+        CF1.update(f1_pc.item())
+        OP.update(precision_oa.item())
+        OR.update(recall_oa.item())
+        OF1.update(f1_oa.item())
+        mAP.update(map_.item())
+
+        results[prefix + 'CP'] = CP
+        results[prefix + 'CR'] = CR
+        results[prefix + 'CF1'] = CF1
+        results[prefix + 'OP'] = OP
+        results[prefix + 'OR'] = OR
+        results[prefix + 'OF1'] = OF1
+        results[prefix + 'mAP'] = mAP
+
+        # for reporting major, moderate, minor cateogory performances
+        for report_name in self.split_cats_dict.keys():
+            reporter = Group_AverageMeter()
+
+            # get report category idxes
+            all_cats = self.category_map.tolist()
+            task_cats = set(cats_in_task_name)
+            report_cats = task_cats & set(self.split_cats_dict[report_name])
+            report_cats_idx = torch.tensor([all_cats.index(cat) for cat in report_cats], dtype=torch.long)
+
+            # CP, CR, CF1 performance of report_categories.
+            _class_precision = precision_score_per_class(targets_total[:, report_cats_idx],
+                                                         predicts_total[:, report_cats_idx], zero_division=0)
+            _class_recall = recall_score_per_class(targets_total[:, report_cats_idx],
+                                                   predicts_total[:, report_cats_idx], zero_division=0)
+            _class_precision = torch.mean(_class_precision)
+            _class_recall = torch.mean(_class_recall)
+            # CF1 bias. note that CF1 is not a mean value of categories' f1_score
+            _class_f1 = ((2*_class_precision*_class_recall)/(_class_precision+_class_recall)) \
+                if (_class_precision+_class_recall)>0 else torch.tensor([0.])
+
+            # OP, OR, OF1 performance of report_categories.
+            _overall_precision = precision_score_overall(targets_total[:, report_cats_idx],
+                                                        predicts_total[:, report_cats_idx], zero_division=0)
+            _overall_recall = recall_score_overall(targets_total[:, report_cats_idx],
+                                                predicts_total[:, report_cats_idx], zero_division=0)
+            _overall_f1 = f1_score_overall(targets_total[:, report_cats_idx],
+                                        predicts_total[:, report_cats_idx], zero_division=0)
+
+            # mAP performance of report_categories.
+            _mAP = mean_average_precision(targets_total[:, report_cats_idx],
+                                          probs_total[:, report_cats_idx])
+
+            reporter.update(['CP'], [_class_precision.item()], [1])
+            reporter.update(['CR'], [_class_recall.item()], [1])
+            reporter.update(['CF1'], [_class_f1.item()], [1])
+            reporter.update(['OP'], [_overall_precision.item()], [1])
+            reporter.update(['OR'], [_overall_recall.item()], [1])
+            reporter.update(['OF1'], [_overall_f1.item()], [1])
+            reporter.update(['mAP'], [_mAP.item()], [1])
+
+            reporter.total.reset()
+            results[prefix + report_name] = reporter
+
+        # write to tensorboard and csv.
+        task_len = t_idx + 1
+        for metric in results.keys():
+            if not metric in [prefix+'CP', prefix+'CR', prefix+'OP', prefix+'OR']:
+                results[metric].write(writer, '%s/%s/%s/task_len(%d)' %
+                                    (metric, eval_title, self.name, task_len),
+                                    step, info='avg')
+
+            results[metric].write_to_excel(os.path.join(writer.logdir, 'results_{}.xlsx'.format(metric)),
+                                            sheet_name=prefix,
+                                            column_name='task {}'.format(self.config['schedule_simple'][t_idx]),
+                                            info='avg')
+
+        # =================================================================================================================
+        # print performances at the end
+        if t_idx == len(self.config['schedule_simple'])-1:
+            src = writer.logdir
+            csv_files = ['major', 'moderate', 'minor', 'OF1', 'CF1', 'mAP', \
+                         prefix+'major', prefix+'moderate', prefix+'minor', prefix+'CF1', prefix+'OF1', prefix+'mAP', \
+                         'forget']
+            for csv_file in csv_files:
+                try:
+                    csv = pd.read_csv(os.path.join(src, 'results_{}.csv'.format(csv_file)), index_col=0)
+
+                    # print performance after training last task
+                    pd.set_option('display.max_rows', None)
+                    print(colorful.bold_green('\n{:10} result'.format(csv_file)).styled_string)
+                    print(csv.round(4).iloc[:,-1])
+
+                    # save as txt
+                    with open(os.path.join(src, 'summary.txt'), 'a') as summary_txt:
+                        summary_txt.write('\n')
+                        summary_txt.write('{:10} result\n'.format(csv_file))
+                        summary_txt.write(csv.round(4).iloc[:,-1].to_string())
+                        summary_txt.write('\n')
+
+                except FileNotFoundError:
+                    print("This excperiment doesn't have {} file!! continue.".format(csv_file))
+                    continue
+
+        model.train(training)
+
+        return results_dict
+
+
+class Soda10M(BaseDataset):
+    name = 'soda'
+
+    def __init__(self, config, train=True):
+        """
+        :param data_name: base name of processed datasets
+        :param transform: image transform pipeline
+        """
+        super().__init__(config, train)
+        print("SODA10M DATASET")
+        # load major, moderate, minor cats lst
+        with open('./resources/major_cats_soda.json', 'r') as f:
+            major_cats = json.load(f)
+        with open('./resources/moderate_cats_soda.json', 'r') as f:
+            moderate_cats = json.load(f)
+        with open('./resources/minor_cats_soda.json', 'r') as f:
+            minor_cats = json.load(f)
+        # for reporting detailed performance of alg at long-tail distribution
+        self.split_cats_dict = {'major': major_cats, 'moderate': moderate_cats, 'minor': minor_cats}
+
+
+        self.num_tasks = int(config['num_tasks'])
+
+        if train:
+            if config['e'] in ['vac_encoder', 'exstream_encoder_vac']:
+                transform = transforms.Compose([
+                    transforms.Resize((288, 288)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+            elif config['e'] == 'rma_encoder':
+                transform = transforms.Compose([
+                    transforms.Resize((512, 512)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+            else:
+                transform = transforms.Compose([
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+
+        else:
+            if config['e'] in ['vac_encoder', 'exstream_encoder_vac']:
+                transform = transforms.Compose([
+                    transforms.Resize((288, 288)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+            elif config['e'] == 'rma_encoder':
+                transform = transforms.Compose([
+                    transforms.Resize((512, 512)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+            else:
+                transform = transforms.Compose([
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])])
+
+        if config['e'] == 'none':
+            transform = None
+
+        # multi_hot dict
+        with open(os.path.join(str(config['data_root']),'multi_hot_dict_{name}.json'.format(name=self.name)), 'r') as j:
+            self.category_map = np.asarray(json.load(j))
+
+        # Create subset for each task
+        for y in range(self.num_tasks):
+            self.subsets[y] = MultiLabelDataset(config, self.name, task_idx=y, transform=transform, train=train)
+
+    def collate_fn(self, batch):
+        nitems = len(batch[0])
+
+        results = []   # stack img, categories
+        for i in range(0, nitems):
+            results.append(torch.stack([item[i] for item in batch]))
+
+        return tuple(results)
+
+    def __len__(self):
+        total_len = 0
+        for y in range(self.num_tasks):
+            total_len += len(self.subsets[y])
+        return total_len
+
+    def _eval_model(
+            self,
+            model: Model,
+            writer: SummaryWriter,
+            step, t, eval_title, results_dict):
+
+        training = model.training
+        model.eval()
+
+        if t in self.config['schedule_simple']:
+            t_idx = self.config['schedule_simple'].index(t)
+        else:
+            t_idx = len(self.config['schedule_simple']) - 1
+
+        # for calculating total performance
+        targets_total = []
+        probs_total = []
+
+        # Accuracy of each subset
+        # for order_i , t_i in enumerate(self.config['schedule_simple'][:t_idx+1]):
+        for order_i , t_i in enumerate(self.config['schedule_simple'][:1]):
+            subset_name = t_i
+            last_id = self.config['schedule_simple'][-1] # XXX should be -1. -2 for debugging.
+            subset = self.subsets[t_i]
+            data = DataLoader(
+                subset,
+                batch_size=self.config['eval_batch_size'],
+                num_workers=self.config['eval_num_workers'],
+                collate_fn=self.collate_fn,
+            )
+
+            # results is dict. {method: group_averagemeter_object}
+            # CORE
+            results, targets, probs = validate(subset_name, model, data, self.category_map,
+                                                  results_dict, last_id, self.split_cats_dict, 10)
+
+            targets_total.append(targets)
+            probs_total.append(probs)
+
+            if subset_name in results_dict:
+                results_dict[subset_name].append(results)
+            else:
+                results_dict[subset_name] = [results]
+
+
+
+            for metric in results.keys():
+                results[metric].write_to_excel(os.path.join(writer.logdir, 'results_{}.xlsx'.format(metric)),
+                                                sheet_name='task {}'.format(subset_name),
+                                                column_name='task {}'.format(self.config['schedule_simple'][t_idx]),
+                                                info='avg')
+
+        # =================================================================================================================
+        # calculate scores for trained tasks.
+        prefix = 'tally_'   # prefix for tensorboard plotting and csv filename
+
+        targets_total = torch.cat(targets_total, axis=0)
+        probs_total = torch.cat(probs_total, axis=0)
+        predicts_total = probs_total > 0.5   # BCE style predicts
+        total_metric = ['CP', 'CR', 'CF1', 'OP', 'OR', 'OF1', 'mAP']
+        results = dict()   # reset results
+
+        CP, CR, CF1, OP, OR, OF1, mAP = (AverageMeter() for _ in range(len(total_metric)))
+
+        ncats = targets_total.sum(axis=0)
+        # ignore classes in future tasks
+        cats_in_task_idx = ncats > 0
+        cats_in_task_name = self.category_map[cats_in_task_idx].tolist()
+        targets_total = targets_total
+        probs_total = probs_total
+        predicts_total = predicts_total
+
+        # calculate score
+        precision_pc = torch.mean(precision_score_per_class(targets_total[:, cats_in_task_idx], predicts_total[:, cats_in_task_idx], zero_division=0))
+        recall_pc = torch.mean(recall_score_per_class(targets_total[:, cats_in_task_idx], predicts_total[:, cats_in_task_idx], zero_division=0))
+        # CF1. note that CF1 is not a mean value of categories' f1_score
+        f1_pc = ((2*precision_pc*recall_pc)/(precision_pc+recall_pc)) if (precision_pc+recall_pc)>0 else torch.tensor([0.])
+        precision_oa = precision_score_overall(targets_total[:, cats_in_task_idx], predicts_total[:, cats_in_task_idx], zero_division=0)
+        recall_oa = recall_score_overall(targets_total[:, cats_in_task_idx], predicts_total[:, cats_in_task_idx], zero_division=0)
+        f1_oa = f1_score_overall(targets_total[:, cats_in_task_idx], predicts_total[:, cats_in_task_idx], zero_division=0)
+        map_ = mean_average_precision(targets_total[:, cats_in_task_idx], probs_total[:, cats_in_task_idx])
+        # save to AverageMeter
+        CP.update(precision_pc.item())
+        CR.update(recall_pc.item())
+        CF1.update(f1_pc.item())
+        OP.update(precision_oa.item())
+        OR.update(recall_oa.item())
+        OF1.update(f1_oa.item())
+        mAP.update(map_.item())
+
+        results[prefix + 'CP'] = CP
+        results[prefix + 'CR'] = CR
+        results[prefix + 'CF1'] = CF1
+        results[prefix + 'OP'] = OP
+        results[prefix + 'OR'] = OR
+        results[prefix + 'OF1'] = OF1
+        results[prefix + 'mAP'] = mAP
+
+        # for reporting major, moderate, minor cateogory performances
+        for report_name in self.split_cats_dict.keys():
+            reporter = Group_AverageMeter()
+
+            # get report category idxes
+            all_cats = self.category_map.tolist()
+            task_cats = set(cats_in_task_name)
+            report_cats = task_cats & set(self.split_cats_dict[report_name])
+            report_cats_idx = torch.tensor([all_cats.index(cat) for cat in report_cats], dtype=torch.long)
+
+            # CP, CR, CF1 performance of report_categories.
+            _class_precision = precision_score_per_class(targets_total[:, report_cats_idx],
+                                                         predicts_total[:, report_cats_idx], zero_division=0)
+            _class_recall = recall_score_per_class(targets_total[:, report_cats_idx],
+                                                   predicts_total[:, report_cats_idx], zero_division=0)
+            _class_precision = torch.mean(_class_precision)
+            _class_recall = torch.mean(_class_recall)
+            # CF1 bias. note that CF1 is not a mean value of categories' f1_score
+            _class_f1 = ((2*_class_precision*_class_recall)/(_class_precision+_class_recall)) \
+                if (_class_precision+_class_recall)>0 else torch.tensor([0.])
+
+            # OP, OR, OF1 performance of report_categories.
+            _overall_precision = precision_score_overall(targets_total[:, report_cats_idx],
+                                                        predicts_total[:, report_cats_idx], zero_division=0)
+            _overall_recall = recall_score_overall(targets_total[:, report_cats_idx],
+                                                predicts_total[:, report_cats_idx], zero_division=0)
+            _overall_f1 = f1_score_overall(targets_total[:, report_cats_idx],
+                                        predicts_total[:, report_cats_idx], zero_division=0)
+
+            # mAP performance of report_categories.
+            _mAP = mean_average_precision(targets_total[:, report_cats_idx],
+                                          probs_total[:, report_cats_idx])
+
+            reporter.update(['CP'], [_class_precision.item()], [1])
+            reporter.update(['CR'], [_class_recall.item()], [1])
+            reporter.update(['CF1'], [_class_f1.item()], [1])
+            reporter.update(['OP'], [_overall_precision.item()], [1])
+            reporter.update(['OR'], [_overall_recall.item()], [1])
+            reporter.update(['OF1'], [_overall_f1.item()], [1])
+            reporter.update(['mAP'], [_mAP.item()], [1])
+
+            reporter.total.reset()
+            results[prefix + report_name] = reporter
+
+        # write to tensorboard and csv.
+        task_len = t_idx + 1
+        for metric in results.keys():
+            if not metric in [prefix+'CP', prefix+'CR', prefix+'OP', prefix+'OR']:
+                results[metric].write(writer, '%s/%s/%s/task_len(%d)' %
+                                    (metric, eval_title, self.name, task_len),
+                                    step, info='avg')
+
+            results[metric].write_to_excel(os.path.join(writer.logdir, 'results_{}.xlsx'.format(metric)),
+                                            sheet_name=prefix,
+                                            column_name='task {}'.format(self.config['schedule_simple'][t_idx]),
+                                            info='avg')
+
+        # =================================================================================================================
+        # print performances at the end
+        if t_idx == len(self.config['schedule_simple'])-1:
+            src = writer.logdir
+            csv_files = ['major', 'moderate', 'minor', 'OF1', 'CF1', 'mAP', \
+                         prefix+'major', prefix+'moderate', prefix+'minor', prefix+'CF1', prefix+'OF1', prefix+'mAP', \
+                         'forget']
+            for csv_file in csv_files:
+                try:
+                    csv = pd.read_csv(os.path.join(src, 'results_{}.csv'.format(csv_file)), index_col=0)
+
+                    # print performance after training last task
+                    pd.set_option('display.max_rows', None)
+                    print(colorful.bold_green('\n{:10} result'.format(csv_file)).styled_string)
+                    print(csv.round(4).iloc[:,-1])
+
+                    # save as txt
+                    with open(os.path.join(src, 'summary.txt'), 'a') as summary_txt:
+                        summary_txt.write('\n')
+                        summary_txt.write('{:10} result\n'.format(csv_file))
+                        summary_txt.write(csv.round(4).iloc[:,-1].to_string())
+                        summary_txt.write('\n')
+
+                except FileNotFoundError:
+                    print("This excperiment doesn't have {} file!! continue.".format(csv_file))
+                    continue
+
+        model.train(training)
+
+        return results_dict
+
+
 DATASET = {
     MNIST.name: MNIST,
     SVHN.name: SVHN,
     MSCOCO.name: MSCOCO,
-    NUSWIDE.name: NUSWIDE
+    NUSWIDE.name: NUSWIDE,
+    CORe50UB.name: CORe50UB,
+    Soda10M.name: Soda10M
 }

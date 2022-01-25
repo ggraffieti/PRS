@@ -1,0 +1,18 @@
+- subsets: [['soda', 0]]
+  epoch: 1
+  shuffle: False
+- subsets: [['soda', 1]]
+  epoch: 1
+  shuffle: False
+- subsets: [['soda', 2]]
+  epoch: 1
+  shuffle: False
+- subsets: [['soda', 3]]
+  epoch: 1
+  shuffle: False
+- subsets: [['soda', 4]]
+  epoch: 1
+  shuffle: False
+- subsets: [['soda', 5]]
+  epoch: 1
+  shuffle: False
