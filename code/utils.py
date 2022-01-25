@@ -312,7 +312,7 @@ class AverageMeter(object):
 
         csv_lst = []
         if os.path.exists(dst):
-            dfs_prev = pd.read_excel(dst, index_col=0, sheet_name=None)
+            dfs_prev = pd.read_excel(dst, index_col=0, sheet_name=None, engine='openpyxl')
             excel_writer = pd.ExcelWriter(dst)
 
             for sheet_name_tmp in dfs_prev.keys():
@@ -402,7 +402,7 @@ class Group_AverageMeter(object):
 
         csv_lst = []
         if os.path.exists(dst):
-            dfs_prev = pd.read_excel(dst, index_col=0, sheet_name=None)
+            dfs_prev = pd.read_excel(dst, index_col=0, sheet_name=None, engine='openpyxl')
             excel_writer = pd.ExcelWriter(dst)
 
             for sheet_name_tmp in dfs_prev.keys():
