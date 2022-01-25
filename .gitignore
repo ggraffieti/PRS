@@ -7,6 +7,10 @@
 
 # Ignore data directory
 data
+data_source
+
+# Ignore logs
+logs
 
 # Ignore checkpoints
 checkpoints
@@ -16,3 +20,4 @@ checkpoints
 *.srt
 *.jpg*
 *.eps
+*.zip
