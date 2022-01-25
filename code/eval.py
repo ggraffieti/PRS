@@ -39,7 +39,7 @@ def get_features(task_id, model, data, cat_map):
     return features_total, cats_total
 
 
-def validate(task_id, model, data, cat_map, results_dict, last_id, additional_report_cats):
+def validate(task_id, model, data, cat_map, results_dict, last_id, additional_report_cats, num_classes):
     """
     :param additional_report_cats: categories list for additional report. \
         dict {report_name: [cat1, cat2, cat3, ...] \
@@ -51,6 +51,9 @@ def validate(task_id, model, data, cat_map, results_dict, last_id, additional_re
     results = {}
     losses = AverageMeter()  # loss (per word decoded)
     accuracies = AverageMeter()
+    accuracy_per_class = []
+    for _ in range(num_classes):
+        accuracy_per_class.append(AverageMeter())
     class_precisions = Group_AverageMeter()
     class_recalls = Group_AverageMeter()
     class_f1s = Group_AverageMeter()
@@ -89,13 +92,35 @@ def validate(task_id, model, data, cat_map, results_dict, last_id, additional_re
             # for mAP score
             cpu_probs.append(predict.cpu())
 
-            predict = predict > 0.5   # BCE
+            predict_bce = predict > 0.5   # BCE
             total_relevant_slots = targets.sum().data
-            relevant_predict = (predict * targets.float()).sum().data
+            relevant_predict = (predict_bce * targets.float()).sum().data
 
             acc = relevant_predict / total_relevant_slots
             losses.update(loss.item(), batch_size)
             accuracies.update(acc, batch_size)
+
+            # ACCURACY PER CLASS
+            t_labels = targets.max(dim=1).indices.cpu().numpy()
+
+            # one label
+            # max_pred = predict.max(dim=1).values.cpu().numpy()
+            # max_pred_idx = predict.max(dim=1).indices.cpu().numpy()
+            # for idx, l in enumerate(max_pred):
+            #     if l <= 0.5:
+            #         max_pred_idx[idx] = -1
+
+            for c in range(num_classes):
+                indices_c = np.where(t_labels == c)[0]
+                nr_lab_class_c = len(indices_c)
+                if nr_lab_class_c > 0:
+                    # One label
+                    # n_correct = (max_pred_idx == c).sum()
+
+                    # multi-labels
+                    n_correct = predict_bce[indices_c.tolist(), c].sum().item()
+                    acc = n_correct / nr_lab_class_c
+                    accuracy_per_class[c].update(acc, nr_lab_class_c)
 
             cpu_targets.append(targets.cpu())
             cpu_predicts.append(predict.cpu())
@@ -204,6 +229,11 @@ def validate(task_id, model, data, cat_map, results_dict, last_id, additional_re
         p_pc, r_pc = torch.mean(precision_pc).item(), torch.mean(recall_pc).item()
         class_f1s.total.update(((2*p_pc*r_pc)/(p_pc+r_pc)) if (p_pc+r_pc)>0 else 0)
 
+        # calculate AMCA per experience
+        amca = AverageMeter()
+        tot_acc = 0
+        for c in range(num_classes):
+            amca.update(accuracy_per_class[c].avg, 1)
 
         # save performances
         results['OF1'] = overall_f1s
@@ -214,6 +244,7 @@ def validate(task_id, model, data, cat_map, results_dict, last_id, additional_re
         results['CR'] = class_recalls
         results['losses'] = losses
         results['accuracies'] = accuracies
+        results['amca'] = amca
 
         results['mAP'] = mAP
 
@@ -344,9 +375,8 @@ def validate(task_id, model, data, cat_map, results_dict, last_id, additional_re
 
         print(colorful.bold_cyan(
             'LOSS - {loss.avg:.3f}, ACCURACY - {acc.avg:.3f}, RECALL - {rcl.total.avg:.4f},\
-            PRECISION - {prc.total.avg:.4f}, F1 - {f1.total.avg:.4f}'
-            .format(loss=losses, acc=accuracies, rcl=class_recalls, prc=class_precisions, f1=class_f1s)).styled_string)
+            PRECISION - {prc.total.avg:.4f}, F1 - {f1.total.avg:.4f}, AMCA = {amca.avg:.4f}'
+            .format(loss=losses, acc=accuracies, rcl=class_recalls, prc=class_precisions, f1=class_f1s, amca=amca)).styled_string)
 
     return results, cpu_targets, cpu_probs
-
 
