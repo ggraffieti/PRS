@@ -45,6 +45,8 @@ def train_model(config, model: MLabReservoir,
             print(colorful.bold_green('\nProgressing to Task %d' % t).styled_string)
 
         if step == 0:
+            # results_dict = scheduler.eval(model, writer, step + 1, prev_t,
+            #                               eval_title='eval', results_dict=results_dict)
             print(colorful.bold_green('\nProgressing to Task %d' % t).styled_string)
 
         if done_t_num >= len(scheduler.schedule):
