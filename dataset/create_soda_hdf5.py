@@ -29,7 +29,7 @@ def create_hdf5_train(source, run, experience, dest):
         img_path = os.path.join(source, img_name)
         img = open_image(img_path)
         imgs.append(img)
-        onehot_label = np.zeros(10, dtype=np.int64)
+        onehot_label = np.zeros(6, dtype=np.int64)
         onehot_label[int(label)] = 1
         labels.append(onehot_label.tolist())
 
@@ -55,7 +55,7 @@ def create_hdf5_test(source, run, nr_exp, dest):
         img_path = os.path.join(source, img_name)
         img = open_image(img_path)
         imgs.append(img)
-        onehot_label = np.zeros(10, dtype=np.int64)
+        onehot_label = np.zeros(6, dtype=np.int64)
         onehot_label[int(label)] = 1
         labels.append(onehot_label.tolist())
 
@@ -77,8 +77,8 @@ def create_dict(destination):
 
 
 if __name__ == "__main__":
-    # for exp in range(6):
-    #     print("create exp {}".format(exp))
-    #     create_hdf5_train("data_source/soda10M", 0, exp, "/home/ggraffieti/dev/PRS/dataset/data/soda10M")
-    # create_hdf5_test("data_source/soda10M", 0, 6, "/home/ggraffieti/dev/PRS/dataset/data/soda10M")
-    create_dict("/home/ggraffieti/dev/PRS/dataset/data/soda10M")
+    for exp in range(6):
+        print("create exp {}".format(exp))
+        create_hdf5_train("data_source/soda10M", 0, exp, "/home/ggraffieti/dev/PRS/dataset/data/soda10M")
+    create_hdf5_test("data_source/soda10M", 0, 6, "/home/ggraffieti/dev/PRS/dataset/data/soda10M")
+    # create_dict("/home/ggraffieti/dev/PRS/dataset/data/soda10M")
