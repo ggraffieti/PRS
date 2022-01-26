@@ -4,6 +4,7 @@
 *.tfidf
 .cenv
 .venv
+.idea
 
 # Ignore data directory
 data
